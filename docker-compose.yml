@@ -1,0 +1,59 @@
+# Local development stack for the MEXC Grok-like bot.
+# Do not expose private APIs or trading bots to the public internet without auth.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: mexc_grok_bot_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-mexc_bot}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bot} -d ${POSTGRES_DB:-mexc_bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+    container_name: mexc_grok_bot_backend
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://${POSTGRES_USER:-bot}:${POSTGRES_PASSWORD:-change_me}@db:5432/${POSTGRES_DB:-mexc_bot}?sslmode=disable
+      MEXC_BASE_URL: ${MEXC_BASE_URL:-https://api.mexc.com}
+      MEXC_API_KEY: ${MEXC_API_KEY:-}
+      MEXC_API_SECRET: ${MEXC_API_SECRET:-}
+      SYMBOL: ${SYMBOL:-BTCUSDT}
+      INTERVAL: ${INTERVAL:-1m}
+      FAST_PERIOD: ${FAST_PERIOD:-9}
+      SLOW_PERIOD: ${SLOW_PERIOD:-21}
+      POLL_SECONDS: ${POLL_SECONDS:-15}
+      PAPER_EQUITY: ${PAPER_EQUITY:-10000}
+      MAX_POSITION_PCT: ${MAX_POSITION_PCT:-0.20}
+      MAX_DRAWDOWN_PCT: ${MAX_DRAWDOWN_PCT:-0.05}
+      ENABLE_LIVE_TRADING: ${ENABLE_LIVE_TRADING:-false}
+      LIVE_ORDER_VALUE_LIMIT: ${LIVE_ORDER_VALUE_LIMIT:-50}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: mexc_grok_bot_frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  db_data:
