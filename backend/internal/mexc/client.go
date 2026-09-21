@@ -13,6 +13,7 @@
 package mexc
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -59,8 +60,11 @@ type Kline struct {
 	Volume   float64   `json:"volume"`
 }
 
-// rawKline matches MEXC array-of-arrays kline response.
-type rawKline []string
+// rawKline accepts both numeric and string JSON values.
+//
+// MEXC kline responses may contain numbers and/or strings depending on endpoint/version.
+// Using json.RawMessage allows us to parse both formats safely.
+type rawKline []json.RawMessage
 
 // Balance represents one asset balance from /api/v3/account.
 type Balance struct {
@@ -107,14 +111,28 @@ func (c *Client) SyncTime(ctx context.Context) error {
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return err
+		return fmt.Errorf("decode server time: %w", err)
 	}
 
-	c.timeOffset = time.UnixMilli(resp.ServerTime).Sub(time.Now())
+	if resp.ServerTime <= 0 {
+		return fmt.Errorf("invalid server time: %d", resp.ServerTime)
+	}
+
+	// time.Until(t) is equivalent to t.Sub(time.Now()), but idiomatic.
+	c.timeOffset = time.Until(time.UnixMilli(resp.ServerTime))
+
 	return nil
 }
 
 // GetKlines fetches public candlestick data.
+//
+// Endpoint:
+// GET /api/v3/klines
+//
+// Example parameters:
+// symbol=BTCUSDT
+// interval=1m
+// limit=100
 func (c *Client) GetKlines(ctx context.Context, symbol, interval string, limit int) ([]Kline, error) {
 	q := url.Values{}
 	q.Set("symbol", symbol)
@@ -126,49 +144,57 @@ func (c *Client) GetKlines(ctx context.Context, symbol, interval string, limit i
 		return nil, err
 	}
 
-	var raw []rawKline
-	if err := json.Unmarshal(data, &raw); err != nil {
+	rawCandles, err := decodeKlines(data)
+	if err != nil {
 		return nil, err
 	}
 
-	out := make([]Kline, 0, len(raw))
-	for _, r := range raw {
-		if len(r) < 6 {
-			continue
+	out := make([]Kline, 0, len(rawCandles))
+
+	for i, raw := range rawCandles {
+		// We need at least:
+		// 0: open time
+		// 1: open
+		// 2: high
+		// 3: low
+		// 4: close
+		// 5: volume
+		if len(raw) < 6 {
+			return nil, fmt.Errorf("kline %d too short: expected at least 6 fields, got %d", i, len(raw))
 		}
 
-		openTime, err := strconv.ParseInt(r[0], 10, 64)
+		openTimeMS, err := parseInt64(raw[0])
 		if err != nil {
-			return nil, fmt.Errorf("parse kline openTime: %w", err)
+			return nil, fmt.Errorf("kline %d openTime: %w", i, err)
 		}
 
-		open, err := strconv.ParseFloat(r[1], 64)
+		open, err := parseFloat(raw[1])
 		if err != nil {
-			return nil, fmt.Errorf("parse kline open: %w", err)
+			return nil, fmt.Errorf("kline %d open: %w", i, err)
 		}
 
-		high, err := strconv.ParseFloat(r[2], 64)
+		high, err := parseFloat(raw[2])
 		if err != nil {
-			return nil, fmt.Errorf("parse kline high: %w", err)
+			return nil, fmt.Errorf("kline %d high: %w", i, err)
 		}
 
-		low, err := strconv.ParseFloat(r[3], 64)
+		low, err := parseFloat(raw[3])
 		if err != nil {
-			return nil, fmt.Errorf("parse kline low: %w", err)
+			return nil, fmt.Errorf("kline %d low: %w", i, err)
 		}
 
-		closePrice, err := strconv.ParseFloat(r[4], 64)
+		closePrice, err := parseFloat(raw[4])
 		if err != nil {
-			return nil, fmt.Errorf("parse kline close: %w", err)
+			return nil, fmt.Errorf("kline %d close: %w", i, err)
 		}
 
-		volume, err := strconv.ParseFloat(r[5], 64)
+		volume, err := parseFloat(raw[5])
 		if err != nil {
-			return nil, fmt.Errorf("parse kline volume: %w", err)
+			return nil, fmt.Errorf("kline %d volume: %w", i, err)
 		}
 
 		out = append(out, Kline{
-			OpenTime: time.UnixMilli(openTime),
+			OpenTime: time.UnixMilli(openTimeMS),
 			Open:     open,
 			High:     high,
 			Low:      low,
@@ -189,7 +215,7 @@ func (c *Client) GetAccount(ctx context.Context) (*Account, error) {
 
 	var acc Account
 	if err := json.Unmarshal(data, &acc); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode account: %w", err)
 	}
 
 	return &acc, nil
@@ -218,7 +244,7 @@ func (c *Client) PlaceMarketBuyQuote(ctx context.Context, symbol string, quoteQt
 
 	var resp OrderResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode market buy response: %w", err)
 	}
 
 	return &resp, nil
@@ -243,7 +269,7 @@ func (c *Client) PlaceMarketSellBase(ctx context.Context, symbol string, baseQty
 
 	var resp OrderResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode market sell response: %w", err)
 	}
 
 	return &resp, nil
@@ -316,7 +342,131 @@ func (c *Client) nowMillis() int64 {
 	return time.Now().Add(c.timeOffset).UnixMilli()
 }
 
+// decodeKlines parses MEXC kline response.
+//
+// Expected successful response is usually an array:
+// [
+//   [openTime, open, high, low, close, volume, ...],
+//   ...
+// ]
+//
+// Error responses may be objects:
+// {
+//   "code": ...,
+//   "msg": "..."
+// }
+func decodeKlines(data []byte) ([]rawKline, error) {
+	trimmed := bytes.TrimSpace(data)
+
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty response body")
+	}
+
+	// If response starts with '{', try to decode as MEXC error object.
+	if trimmed[0] == '{' {
+		var apiErr struct {
+			Code    int    `json:"code"`
+			Msg     string `json:"msg"`
+			Message string `json:"message"`
+		}
+
+		if err := json.Unmarshal(trimmed, &apiErr); err == nil {
+			msg := apiErr.Msg
+			if msg == "" {
+				msg = apiErr.Message
+			}
+
+			if apiErr.Code != 0 || msg != "" {
+				return nil, fmt.Errorf("mexc api error: code=%d msg=%s", apiErr.Code, msg)
+			}
+		}
+	}
+
+	var raw []rawKline
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		return nil, fmt.Errorf("decode klines: %w; raw_prefix=%s", err, prefixForError(trimmed))
+	}
+
+	return raw, nil
+}
+
+// parseInt64 parses JSON value that may be number or string.
+func parseInt64(raw json.RawMessage) (int64, error) {
+	raw = bytes.TrimSpace(raw)
+
+	if len(raw) == 0 {
+		return 0, fmt.Errorf("empty value")
+	}
+
+	if string(raw) == "null" {
+		return 0, fmt.Errorf("null value")
+	}
+
+	// Try native int64.
+	var n int64
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n, nil
+	}
+
+	// Try string containing integer.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return 0, fmt.Errorf("empty string value")
+		}
+		return strconv.ParseInt(s, 10, 64)
+	}
+
+	// Try float, then truncate. Useful if API returns 1730000000000.0.
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return int64(f), nil
+	}
+
+	return 0, fmt.Errorf("cannot parse int64 from %s", string(raw))
+}
+
+// parseFloat parses JSON value that may be number or string.
+func parseFloat(raw json.RawMessage) (float64, error) {
+	raw = bytes.TrimSpace(raw)
+
+	if len(raw) == 0 {
+		return 0, fmt.Errorf("empty value")
+	}
+
+	if string(raw) == "null" {
+		return 0, fmt.Errorf("null value")
+	}
+
+	// Try native float64.
+	var f float64
+	if err := json.Unmarshal(raw, &f); err == nil {
+		return f, nil
+	}
+
+	// Try string containing decimal number.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return 0, fmt.Errorf("empty string value")
+		}
+		return strconv.ParseFloat(s, 64)
+	}
+
+	return 0, fmt.Errorf("cannot parse float64 from %s", string(raw))
+}
+
 func formatFloat(f float64) string {
 	// Avoid scientific notation for API query parameters.
 	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+func prefixForError(data []byte) string {
+	const maxLen = 240
+	if len(data) <= maxLen {
+		return string(data)
+	}
+	return string(data[:maxLen]) + "..."
 }

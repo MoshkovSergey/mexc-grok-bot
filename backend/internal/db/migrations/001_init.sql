@@ -28,10 +28,26 @@ CREATE TABLE IF NOT EXISTS bot_state (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Ensure a singleton row exists. Actual cash is initialized by backend if missing.
-INSERT INTO bot_state (id, mode, status, cash, position_qty, entry_price, last_signal)
-VALUES (1, 'paper', 'stopped', 0, 0, 0, 'none')
-ON CONFLICT (id) DO NOTHING;
+-- Hot-reloadable trading settings. signal_source selects the trigger layer:
+--   'sma' = built-in moving-average crossover (research baseline)
+--   'cts' = local Go port of the Pine CTS-CISD indicator (no TradingView dependency)
+-- Live trading is NEVER controlled from here (env-only).
+CREATE TABLE IF NOT EXISTS bot_settings (
+    id SMALLINT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    fast_period INT NOT NULL,
+    slow_period INT NOT NULL,
+    poll_seconds INT NOT NULL,
+    max_position_pct DOUBLE PRECISION NOT NULL,
+    max_drawdown_pct DOUBLE PRECISION NOT NULL,
+    paper_equity DOUBLE PRECISION NOT NULL,
+    live_order_value_limit DOUBLE PRECISION NOT NULL,
+    signal_source TEXT NOT NULL DEFAULT 'sma',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE bot_settings ADD COLUMN IF NOT EXISTS signal_source TEXT NOT NULL DEFAULT 'sma';
 
 CREATE TABLE IF NOT EXISTS paper_orders (
     id BIGSERIAL PRIMARY KEY,

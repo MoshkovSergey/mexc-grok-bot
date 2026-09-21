@@ -3,35 +3,38 @@
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
-export async function getJSON(path) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-    },
-  })
-
+async function handle(res) {
   if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`GET ${path} failed: ${res.status} ${text}`)
+    let detail = ''
+    try {
+      const j = await res.json()
+      detail = j.error || JSON.stringify(j)
+    } catch {
+      detail = await res.text().catch(() => '')
+    }
+    throw new Error(`${res.method} ${res.url} failed: ${res.status} ${detail}`)
   }
-
   return res.json()
 }
 
+export async function getJSON(path) {
+  return handle(await fetch(`${API_BASE}${path}`, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  }))
+}
+
 export async function postJSON(path) {
-  const res = await fetch(`${API_BASE}${path}`, {
+  return handle(await fetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-  })
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+  }))
+}
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`POST ${path} failed: ${res.status} ${text}`)
-  }
-
-  return res.json()
+export async function putJSON(path, body) {
+  return handle(await fetch(`${API_BASE}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  }))
 }
