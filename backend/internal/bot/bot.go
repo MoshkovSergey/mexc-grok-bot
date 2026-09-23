@@ -1,11 +1,14 @@
 // Package bot implements a rule-based trading engine with risk controls, hot-reloadable
-// runtime settings, pluggable LOCAL signal sources ("sma" | "cts"), and a non-trading
-// structural-liquidity overlay (Smart Money / POC port, CC BY-NC-SA 4.0, see strategy).
+// runtime settings, pluggable LOCAL signal sources ("sma" | "cts"), a non-trading
+// structural-liquidity overlay (Smart Money / POC port, CC BY-NC-SA 4.0, see strategy),
+// and an offline cost-aware backtest comparison (read-only wrt trading).
 //
 // Default mode: paper trading. Live trading only when ENABLE_LIVE_TRADING=true (env-only).
 // Long-only on spot: a CTS SHORT means "exit the long position", never "open a short".
 // The Smart Money overlay is OBSERVABILITY ONLY: it never triggers orders and never
-// changes risk limits.
+// changes risk limits. Manual close (ClosePosition) is the operator's exit hatch and
+// works regardless of running state (including after a risk stop), because exiting an
+// open position cannot increase risk.
 package bot
 
 import (
@@ -160,7 +163,7 @@ func settingsFromEnv(cfg *config.Config) RuntimeSettings {
 	return RuntimeSettings{
 		Symbol: cfg.Symbol, Interval: cfg.Interval,
 		FastPeriod: cfg.FastPeriod, SlowPeriod: cfg.SlowPeriod,
-		PollSeconds:    cfg.PollSeconds,
+		PollSeconds: cfg.PollSeconds,
 		MaxPositionPct: cfg.MaxPositionPct, MaxDrawdownPct: cfg.MaxDrawdownPct,
 		PaperEquity: cfg.PaperEquity, LiveOrderValueLimit: cfg.LiveOrderValueLimit,
 		SignalSource: "sma", UpdatedAt: time.Now(),
@@ -213,6 +216,38 @@ func (b *Bot) Stop(ctx context.Context) error {
 	b.state.Status = "stopped"
 	b.persistStateLocked()
 	return nil
+}
+
+// ClosePosition manually flattens any open position at the latest known price.
+// It works regardless of b.running (including after a risk stop), because exiting
+// an open position cannot increase risk; it only realizes it. The bot does NOT need
+// to be running. In live mode this sends a REAL market sell order.
+func (b *Bot) ClosePosition(ctx context.Context) (map[string]any, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	const eps = 1e-12
+	if b.state.PositionQty <= eps {
+		return nil, errors.New("нет открытой позиции для закрытия")
+	}
+	s := b.settings
+	price, ok := b.lastClosePriceLocked(s.Symbol, s.Interval)
+	if !ok || price <= 0 {
+		return nil, errors.New("нет свежей цены для закрытия; дождитесь поллинга или сбросьте состояние")
+	}
+	note := "ручное закрытие позиции"
+	qty, execPrice, closed := b.closePositionLocked(ctx, price, note, s)
+	if !closed {
+		// closePositionLocked already recorded a risk event on live failure.
+		return nil, errors.New("не удалось закрыть позицию (см. risk events)")
+	}
+	b.persistStateLocked()
+	return map[string]any{
+		"closedQty": qty,
+		"price":     execPrice,
+		"mode":      b.state.Mode,
+		"note":      note,
+	}, nil
 }
 
 func (b *Bot) GetSettings() SettingsResponse {
@@ -353,7 +388,6 @@ func (b *Bot) Dashboard(ctx context.Context) (*Dashboard, error) {
 		}
 	}
 
-	// Trim Smart Money per-bar to the chart window; keep the terminal profile snapshot.
 	var smOut *strategy.SmartMoneyResult
 	if sm != nil {
 		trimmed := *sm
@@ -370,7 +404,7 @@ func (b *Bot) Dashboard(ctx context.Context) (*Dashboard, error) {
 		PositionValue: positionValue, EntryPrice: state.EntryPrice, LastSignal: state.LastSignal,
 		PeakEquity: peak, MaxDrawdownPct: s.MaxDrawdownPct, CurrentDrawdownPct: drawdown,
 		LiveTradingEnabled: b.cfg.EnableLiveTrading,
-		Candles:            candles, Orders: orders, Snapshots: snapshots, RiskEvents: risks,
+		Candles: candles, Orders: orders, Snapshots: snapshots, RiskEvents: risks,
 		Indicator: indBars, IndicatorSummary: indSummary, SmartMoney: smOut,
 	}, nil
 }
@@ -385,9 +419,8 @@ func (b *Bot) poll(ctx context.Context) error {
 	if s.SignalSource == "cts" && limit < 400 {
 		limit = 400
 	}
-	// Smart Money needs >= LiquidityLen + ATRLen bars to stand up levels/profile.
 	if limit < 300 {
-		limit = 300
+		limit = 300 // Smart Money needs >= LiquidityLen + ATRLen bars.
 	}
 	if limit > 1000 {
 		limit = 1000 // MEXC klines hard cap.
@@ -424,7 +457,6 @@ func (b *Bot) poll(ctx context.Context) error {
 	last := candles[len(candles)-1]
 
 	var signal string
-
 	switch s.SignalSource {
 	case "cts":
 		signal = b.computeCTSSignal(ctx, s, mainClosed)
@@ -487,7 +519,6 @@ func (b *Bot) computeCTSSignal(ctx context.Context, s RuntimeSettings, mainClose
 	b.mu.Unlock()
 
 	if !res.Progressed {
-		// Not enough warmed history to trust signals yet; do not act, but keep rendering.
 		return ""
 	}
 
@@ -543,6 +574,9 @@ func (b *Bot) handleSignal(ctx context.Context, signal string, price float64, s 
 		drawdown = (b.peakEquity - equity) / b.peakEquity
 	}
 	if drawdown >= s.MaxDrawdownPct {
+		// Kill-switch halts NEW entries but does NOT force-flatten an open position
+		// (matches live broker behavior: stop trading, leave the position for the
+		// operator to manage, e.g. via ClosePosition).
 		b.running = false
 		b.state.Status = "risk_stopped"
 		b.state.LastSignal = "RISK_STOP"
@@ -554,12 +588,12 @@ func (b *Bot) handleSignal(ctx context.Context, signal string, price float64, s 
 	if b.cfg.EnableLiveTrading {
 		b.executeLiveLocked(ctx, signal, price, equity, s)
 	} else {
-		b.executePaperLocked(signal, price, equity, s)
+		b.executePaperLocked(ctx, signal, price, equity, s)
 	}
 	b.persistStateLocked()
 }
 
-func (b *Bot) executePaperLocked(signal string, price float64, equity float64, s RuntimeSettings) {
+func (b *Bot) executePaperLocked(ctx context.Context, signal string, price float64, equity float64, s RuntimeSettings) {
 	const eps = 1e-12
 	srcNote := "paper: пересечение SMA"
 	if s.SignalSource == "cts" {
@@ -589,15 +623,7 @@ func (b *Bot) executePaperLocked(signal string, price float64, equity float64, s
 		b.state.LastSignal = "BUY"
 		b.recordOrderLocked(s.Symbol, "BUY", qty, price, "filled", srcNote)
 	case "SELL":
-		if b.state.PositionQty <= eps {
-			return
-		}
-		qty := b.state.PositionQty
-		b.state.Cash += qty * price
-		b.state.PositionQty = 0
-		b.state.EntryPrice = 0
-		b.state.LastSignal = "SELL"
-		b.recordOrderLocked(s.Symbol, "SELL", qty, price, "filled", srcNote)
+		b.closePositionLocked(ctx, price, srcNote, s)
 	}
 }
 
@@ -623,23 +649,43 @@ func (b *Bot) executeLiveLocked(ctx context.Context, signal string, price float6
 		b.state.PositionQty = newPosition
 		b.state.EntryPrice = newEntry
 		b.state.LastSignal = "BUY"
-		b.recordOrderLocked(s.Symbol, "BUY", approxQty, price, resp.Status, fmt.Sprintf("live: рыночная покупка orderId=%d quoteQty=%.8f", resp.OrderID, orderValue))	
-		case "SELL":
-		if b.state.PositionQty <= eps {
-			return
-		}
-		qty := b.state.PositionQty
+		b.recordOrderLocked(s.Symbol, "BUY", approxQty, price, resp.Status, fmt.Sprintf("live: рыночная покупка orderId=%d quoteQty=%.8f", resp.OrderID, orderValue))
+	case "SELL":
+		b.closePositionLocked(ctx, price, "live: рыночная продажа", s)
+	}
+}
+
+// closePositionLocked flattens the ENTIRE open position (paper or live) and records the
+// order. It is the SINGLE source of truth for exits: both the automatic SELL signal and
+// the manual ClosePosition route go through here, so their accounting can never diverge.
+// Caller MUST hold b.mu. Returns (closedQty, execPrice, ok); ok=false means nothing to
+// close or a live order failure (failure already recorded as a risk event).
+func (b *Bot) closePositionLocked(ctx context.Context, price float64, note string, s RuntimeSettings) (float64, float64, bool) {
+	const eps = 1e-12
+	if b.state.PositionQty <= eps || price <= 0 {
+		return 0, 0, false
+	}
+	qty := b.state.PositionQty
+	if b.cfg.EnableLiveTrading {
 		resp, err := b.mxc.PlaceMarketSellBase(ctx, s.Symbol, qty)
 		if err != nil {
-			b.recordRiskLocked("live_order_error", fmt.Sprintf("SELL (продажа): %v", err))
-			return
+			b.recordRiskLocked("live_order_error", fmt.Sprintf("SELL (закрытие): %v", err))
+			return 0, 0, false
 		}
 		b.state.Cash += qty * price
 		b.state.PositionQty = 0
 		b.state.EntryPrice = 0
 		b.state.LastSignal = "SELL"
-		b.recordOrderLocked(s.Symbol, "SELL", qty, price, resp.Status, fmt.Sprintf("live: рыночная продажа orderId=%d baseQty=%.8f", resp.OrderID, qty))
+		b.recordOrderLocked(s.Symbol, "SELL", qty, price, resp.Status,
+			fmt.Sprintf("%s orderId=%d baseQty=%.8f", note, resp.OrderID, qty))
+		return qty, price, true
 	}
+	b.state.Cash += qty * price
+	b.state.PositionQty = 0
+	b.state.EntryPrice = 0
+	b.state.LastSignal = "SELL"
+	b.recordOrderLocked(s.Symbol, "SELL", qty, price, "filled", note)
+	return qty, price, true
 }
 
 func computeSignal(candles []mexc.Kline, fastPeriod, slowPeriod int) string {
@@ -998,12 +1044,13 @@ func (b *Bot) RunBacktest(ctx context.Context, symbol, interval, source string, 
 		return nil, err
 	}
 	if len(candles) < 50 {
-		return nil, fmt.Errorf("only %d confirmed candles in window; need >=50", len(candles))
+		return nil, fmt.Errorf("в окне только %d подтверждённых свечей; нужно >=50", len(candles))
 	}
 
 	fee := backtest.ResolveFees(takerBps, slipBps)
+	sk := b.getSettingsCopy()
 	base := backtest.Config{
-		Interval: interval, FastPeriod: b.settings.FastPeriod, SlowPeriod: b.settings.SlowPeriod,
+		Interval: interval, FastPeriod: sk.FastPeriod, SlowPeriod: sk.SlowPeriod,
 		MaxPositionPct: maxPos, MaxDrawdownPct: maxDD, StartEquity: equity,
 		Fee: fee, Execution: backtest.NextBarOpen,
 	}
@@ -1030,7 +1077,6 @@ func (b *Bot) RunBacktest(ctx context.Context, symbol, interval, source string, 
 		c.Source = "cts"
 		p := strategy.DefaultParams()
 		c.CTSParams = &p
-		// HTF: prefer DB, fallback to a read-only exchange fetch.
 		var htf []strategy.Candle
 		if n, _ := backtest.CountCandles(ctx, b.db, symbol, p.HTFTimeframe); n > 0 {
 			htf, err = backtest.LoadCandles(ctx, b.db, symbol, p.HTFTimeframe, time.Time{}, time.Time{})

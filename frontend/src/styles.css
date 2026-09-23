@@ -212,3 +212,17 @@ td.empty { color: var(--muted); white-space: normal; }
 .bt-sens h3 { margin: 8px 0 6px; font-size: 15px; }
 .bt-sens-summary { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
 .bt-sens-summary em { color: var(--yellow); font-style: normal; }
+
+/* Manual close button (danger accent, disabled when no open position) */
+.danger {
+  background: #dc2626;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 9px 16px;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+.danger:hover:not(:disabled) { background: #b91c1c; }
+.danger:disabled { background: rgba(220, 38, 38, 0.35); color: rgba(255, 255, 255, 0.6); cursor: not-allowed; }

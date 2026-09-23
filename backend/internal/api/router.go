@@ -1,5 +1,5 @@
-// Package api exposes HTTP endpoints for the dashboard, bot control, settings and
-// the offline backtest comparison (read-only wrt trading).
+// Package api exposes HTTP endpoints for the dashboard, bot control, settings,
+// manual position close, and the offline backtest comparison (read-only wrt trading).
 package api
 
 import (
@@ -65,6 +65,17 @@ func NewRouter(b *bot.Bot, cfg *config.Config) http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+	})
+	// Manual close of any open position. Works regardless of running state (incl. after
+	// a risk stop). In live mode this sends a REAL market sell order; the frontend MUST
+	// confirm before calling.
+	mux.HandleFunc("POST /api/bot/close", func(w http.ResponseWriter, r *http.Request) {
+		res, err := b.ClosePosition(r.Context())
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
 	})
 
 	// Offline, cost-aware backtest comparison (read-only; heavy CTS grid is CLI-only).
