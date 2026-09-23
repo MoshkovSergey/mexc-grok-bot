@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoshkovSergey/mexc-grok-bot/backend/internal/backtest"
 	"github.com/MoshkovSergey/mexc-grok-bot/backend/internal/config"
 	"github.com/MoshkovSergey/mexc-grok-bot/backend/internal/mexc"
 	"github.com/MoshkovSergey/mexc-grok-bot/backend/internal/strategy"
@@ -35,8 +36,8 @@ var ValidIntervals = []string{
 var ValidSignalSources = []string{"sma", "cts"}
 
 var (
-	ErrLiveSymbolChangeWithPosition = errors.New("cannot change symbol while a live position is open; close it manually first")
-	ErrNoPriceForAutoClose          = errors.New("no recent price available to auto-close the paper position before changing symbol; wait for data or reset state")
+	ErrLiveSymbolChangeWithPosition = errors.New("нельзя сменить пару при открытой live‑позиции; сначала закройте её вручную")
+	ErrNoPriceForAutoClose          = errors.New("нет свежей цены для автозакрытия paper‑позиции перед сменой пары; дождитесь данных или сбросьте состояние")
 )
 
 var symbolRe = regexp.MustCompile(`^[A-Z0-9]{2,20}$`)
@@ -94,29 +95,29 @@ type RiskEventRow struct {
 }
 
 type Dashboard struct {
-	Status             string                    `json:"status"`
-	Mode               string                    `json:"mode"`
-	Symbol             string                    `json:"symbol"`
-	Interval           string                    `json:"interval"`
-	SignalSource       string                    `json:"signalSource"`
-	Running            bool                      `json:"running"`
-	LastUpdate         time.Time                 `json:"lastUpdate"`
-	Equity             float64                   `json:"equity"`
-	Cash               float64                   `json:"cash"`
-	PositionQty        float64                   `json:"positionQty"`
-	PositionValue      float64                   `json:"positionValue"`
-	EntryPrice         float64                   `json:"entryPrice"`
-	LastSignal         string                    `json:"lastSignal"`
-	PeakEquity         float64                   `json:"peakEquity"`
-	MaxDrawdownPct     float64                   `json:"maxDrawdownPct"`
-	CurrentDrawdownPct float64                   `json:"currentDrawdownPct"`
-	LiveTradingEnabled bool                      `json:"liveTradingEnabled"`
-	Candles            []mexc.Kline              `json:"candles"`
-	Orders             []OrderRow                `json:"orders"`
-	Snapshots          []SnapshotRow             `json:"snapshots"`
-	RiskEvents         []RiskEventRow            `json:"riskEvents"`
-	Indicator          []strategy.BarState       `json:"indicator"`
-	IndicatorSummary   *strategy.Result          `json:"indicatorSummary"`
+	Status             string                     `json:"status"`
+	Mode               string                     `json:"mode"`
+	Symbol             string                     `json:"symbol"`
+	Interval           string                     `json:"interval"`
+	SignalSource       string                     `json:"signalSource"`
+	Running            bool                       `json:"running"`
+	LastUpdate         time.Time                  `json:"lastUpdate"`
+	Equity             float64                    `json:"equity"`
+	Cash               float64                    `json:"cash"`
+	PositionQty        float64                    `json:"positionQty"`
+	PositionValue      float64                    `json:"positionValue"`
+	EntryPrice         float64                    `json:"entryPrice"`
+	LastSignal         string                     `json:"lastSignal"`
+	PeakEquity         float64                    `json:"peakEquity"`
+	MaxDrawdownPct     float64                    `json:"maxDrawdownPct"`
+	CurrentDrawdownPct float64                    `json:"currentDrawdownPct"`
+	LiveTradingEnabled bool                       `json:"liveTradingEnabled"`
+	Candles            []mexc.Kline               `json:"candles"`
+	Orders             []OrderRow                 `json:"orders"`
+	Snapshots          []SnapshotRow              `json:"snapshots"`
+	RiskEvents         []RiskEventRow             `json:"riskEvents"`
+	Indicator          []strategy.BarState        `json:"indicator"`
+	IndicatorSummary   *strategy.Result           `json:"indicatorSummary"`
 	SmartMoney         *strategy.SmartMoneyResult `json:"smartMoney"`
 }
 
@@ -159,7 +160,7 @@ func settingsFromEnv(cfg *config.Config) RuntimeSettings {
 	return RuntimeSettings{
 		Symbol: cfg.Symbol, Interval: cfg.Interval,
 		FastPeriod: cfg.FastPeriod, SlowPeriod: cfg.SlowPeriod,
-		PollSeconds: cfg.PollSeconds,
+		PollSeconds:    cfg.PollSeconds,
 		MaxPositionPct: cfg.MaxPositionPct, MaxDrawdownPct: cfg.MaxDrawdownPct,
 		PaperEquity: cfg.PaperEquity, LiveOrderValueLimit: cfg.LiveOrderValueLimit,
 		SignalSource: "sma", UpdatedAt: time.Now(),
@@ -196,7 +197,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.state.Status == "risk_stopped" {
-		return errors.New("bot is stopped by risk manager; reset bot_state manually or redeploy with new peak")
+		return errors.New("бот остановлен риск‑менеджером; сбросьте bot_state вручную или переразверните с новым пиком")
 	}
 	b.running = true
 	b.state.Status = "running"
@@ -240,7 +241,7 @@ func (b *Bot) UpdateSettings(ctx context.Context, incoming RuntimeSettings) erro
 				return ErrNoPriceForAutoClose
 			}
 			b.state.Cash += b.state.PositionQty * price
-			b.recordOrderLocked(old.Symbol, "SELL", b.state.PositionQty, price, "filled", "auto-close on symbol change")
+			b.recordOrderLocked(old.Symbol, "SELL", b.state.PositionQty, price, "filled", "автозакрытие при смене пары")
 			b.state.PositionQty = 0
 			b.state.EntryPrice = 0
 			b.peakEquity = b.state.Cash
@@ -369,7 +370,7 @@ func (b *Bot) Dashboard(ctx context.Context) (*Dashboard, error) {
 		PositionValue: positionValue, EntryPrice: state.EntryPrice, LastSignal: state.LastSignal,
 		PeakEquity: peak, MaxDrawdownPct: s.MaxDrawdownPct, CurrentDrawdownPct: drawdown,
 		LiveTradingEnabled: b.cfg.EnableLiveTrading,
-		Candles: candles, Orders: orders, Snapshots: snapshots, RiskEvents: risks,
+		Candles:            candles, Orders: orders, Snapshots: snapshots, RiskEvents: risks,
 		Indicator: indBars, IndicatorSummary: indSummary, SmartMoney: smOut,
 	}, nil
 }
@@ -423,9 +424,10 @@ func (b *Bot) poll(ctx context.Context) error {
 	last := candles[len(candles)-1]
 
 	var signal string
+
 	switch s.SignalSource {
 	case "cts":
-				signal = b.computeCTSSignal(ctx, s, mainClosed)
+		signal = b.computeCTSSignal(ctx, s, mainClosed)
 	default: // "sma"
 		signal = computeSignal(candles, s.FastPeriod, s.SlowPeriod)
 	}
@@ -445,21 +447,33 @@ func (b *Bot) poll(ctx context.Context) error {
 	return nil
 }
 
-// computeCTSSignal now receives pre-confirmed main candles (shared with Smart Money)
-// and only fetches the HTF series itself.
+// computeCTSSignal pulls the HTF candles, persists them, drops forming bars on BOTH
+// series (non-repaint), runs the local CTS port, caches the result for the chart, and
+// maps the composite Side to the engine's BUY/SELL vocabulary (long-only spot:
+// SHORT=exit).
 func (b *Bot) computeCTSSignal(ctx context.Context, s RuntimeSettings, mainClosed []strategy.Candle) string {
 	p := strategy.DefaultParams()
 
 	htfLimit := p.HTFLen + 60
 	if htfLimit > 1000 {
-		htfLimit = 1000
+		htfLimit = 1000 // MEXC klines hard cap.
 	}
+
 	htf, err := b.mxc.GetKlines(ctx, s.Symbol, p.HTFTimeframe, htfLimit)
 	if err != nil {
 		log.Printf("cts htf klines failed: %v", err)
 		return ""
 	}
-	sort.Slice(htf, func(i, j int) bool { return htf[i].OpenTime.Before(htf[j].OpenTime) })
+
+	sort.Slice(htf, func(i, j int) bool {
+		return htf[i].OpenTime.Before(htf[j].OpenTime)
+	})
+
+	// Persist HTF so the offline backtest can replay CTS without a network fetch.
+	if err := b.upsertCandles(ctx, s.Symbol, p.HTFTimeframe, htf); err != nil {
+		log.Printf("cts htf upsert failed: %v", err)
+	}
+
 	htfClosed := confirmedOnly(toStrategyCandles(htf), p.HTFTimeframe)
 
 	if len(mainClosed) == 0 {
@@ -473,14 +487,17 @@ func (b *Bot) computeCTSSignal(ctx context.Context, s RuntimeSettings, mainClose
 	b.mu.Unlock()
 
 	if !res.Progressed {
+		// Not enough warmed history to trust signals yet; do not act, but keep rendering.
 		return ""
 	}
+
 	switch res.Side {
 	case "LONG":
 		return "BUY"
 	case "SHORT":
 		return "SELL"
 	}
+
 	return ""
 }
 
@@ -529,7 +546,8 @@ func (b *Bot) handleSignal(ctx context.Context, signal string, price float64, s 
 		b.running = false
 		b.state.Status = "risk_stopped"
 		b.state.LastSignal = "RISK_STOP"
-		b.recordRiskLocked("max_drawdown", fmt.Sprintf("drawdown %.6f >= limit %.6f; equity=%.8f peak=%.8f", drawdown, s.MaxDrawdownPct, equity, b.peakEquity))
+		b.recordRiskLocked("max_drawdown",
+			fmt.Sprintf("просадка %.6f >= лимит %.6f; equity=%.8f peak=%.8f", drawdown, s.MaxDrawdownPct, equity, b.peakEquity))
 		b.persistStateLocked()
 		return
 	}
@@ -543,9 +561,9 @@ func (b *Bot) handleSignal(ctx context.Context, signal string, price float64, s 
 
 func (b *Bot) executePaperLocked(signal string, price float64, equity float64, s RuntimeSettings) {
 	const eps = 1e-12
-	srcNote := "paper SMA cross"
+	srcNote := "paper: пересечение SMA"
 	if s.SignalSource == "cts" {
-		srcNote = "paper CTS-CISD signal"
+		srcNote = "paper: сигнал CTS-CISD"
 	}
 	switch signal {
 	case "BUY":
@@ -595,7 +613,7 @@ func (b *Bot) executeLiveLocked(ctx context.Context, signal string, price float6
 		}
 		resp, err := b.mxc.PlaceMarketBuyQuote(ctx, s.Symbol, orderValue)
 		if err != nil {
-			b.recordRiskLocked("live_order_error", fmt.Sprintf("BUY: %v", err))
+			b.recordRiskLocked("live_order_error", fmt.Sprintf("BUY (покупка): %v", err))
 			return
 		}
 		approxQty := orderValue / price
@@ -605,22 +623,22 @@ func (b *Bot) executeLiveLocked(ctx context.Context, signal string, price float6
 		b.state.PositionQty = newPosition
 		b.state.EntryPrice = newEntry
 		b.state.LastSignal = "BUY"
-		b.recordOrderLocked(s.Symbol, "BUY", approxQty, price, resp.Status, fmt.Sprintf("live market buy orderId=%d quoteQty=%.8f", resp.OrderID, orderValue))
-	case "SELL":
+		b.recordOrderLocked(s.Symbol, "BUY", approxQty, price, resp.Status, fmt.Sprintf("live: рыночная покупка orderId=%d quoteQty=%.8f", resp.OrderID, orderValue))	
+		case "SELL":
 		if b.state.PositionQty <= eps {
 			return
 		}
 		qty := b.state.PositionQty
 		resp, err := b.mxc.PlaceMarketSellBase(ctx, s.Symbol, qty)
 		if err != nil {
-			b.recordRiskLocked("live_order_error", fmt.Sprintf("SELL: %v", err))
+			b.recordRiskLocked("live_order_error", fmt.Sprintf("SELL (продажа): %v", err))
 			return
 		}
 		b.state.Cash += qty * price
 		b.state.PositionQty = 0
 		b.state.EntryPrice = 0
 		b.state.LastSignal = "SELL"
-		b.recordOrderLocked(s.Symbol, "SELL", qty, price, resp.Status, fmt.Sprintf("live market sell orderId=%d baseQty=%.8f", resp.OrderID, qty))
+		b.recordOrderLocked(s.Symbol, "SELL", qty, price, resp.Status, fmt.Sprintf("live: рыночная продажа orderId=%d baseQty=%.8f", resp.OrderID, qty))
 	}
 }
 
@@ -670,36 +688,36 @@ func (b *Bot) mode() string {
 func validateRuntime(s RuntimeSettings) error {
 	s.Symbol = strings.ToUpper(strings.TrimSpace(s.Symbol))
 	if !symbolRe.MatchString(s.Symbol) {
-		return fmt.Errorf("invalid symbol %q (expected 2-20 chars A-Z0-9)", s.Symbol)
+		return fmt.Errorf("недопустимый символ %q (ожидается 2–20 символов A-Z0-9)", s.Symbol)
 	}
 	s.Interval = strings.TrimSpace(s.Interval)
 	if !containsString(ValidIntervals, s.Interval) {
-		return fmt.Errorf("invalid interval %q (allowed: %s)", s.Interval, strings.Join(ValidIntervals, ", "))
+		return fmt.Errorf("недопустимый интервал %q (допустимо: %s)", s.Interval, strings.Join(ValidIntervals, ", "))
 	}
 	s.SignalSource = strings.ToLower(strings.TrimSpace(s.SignalSource))
 	if s.SignalSource == "" {
 		s.SignalSource = "sma"
 	}
 	if !containsString(ValidSignalSources, s.SignalSource) {
-		return fmt.Errorf("invalid signalSource %q (allowed: %s)", s.SignalSource, strings.Join(ValidSignalSources, ", "))
+		return fmt.Errorf("недопустимый signalSource %q (допустимо: %s)", s.SignalSource, strings.Join(ValidSignalSources, ", "))
 	}
 	if s.FastPeriod <= 0 || s.SlowPeriod <= 0 || s.FastPeriod >= s.SlowPeriod {
-		return fmt.Errorf("strategy periods must satisfy 0 < fastPeriod < slowPeriod")
+		return fmt.Errorf("периоды стратегии должны удовлетворять 0 < fastPeriod < slowPeriod")
 	}
 	if s.PollSeconds < 5 {
-		return fmt.Errorf("pollSeconds must be >= 5")
+		return fmt.Errorf("pollSeconds должно быть >= 5")
 	}
 	if s.MaxPositionPct <= 0 || s.MaxPositionPct > 1 {
-		return fmt.Errorf("maxPositionPct must be in (0, 1]")
+		return fmt.Errorf("maxPositionPct должно быть в (0, 1]")
 	}
 	if s.MaxDrawdownPct <= 0 || s.MaxDrawdownPct > 1 {
-		return fmt.Errorf("maxDrawdownPct must be in (0, 1]")
+		return fmt.Errorf("maxDrawdownPct должно быть в (0, 1]")
 	}
 	if s.PaperEquity <= 0 {
-		return fmt.Errorf("paperEquity must be positive")
+		return fmt.Errorf("paperEquity должно быть положительным")
 	}
 	if s.LiveOrderValueLimit <= 0 {
-		return fmt.Errorf("liveOrderValueLimit must be positive")
+		return fmt.Errorf("liveOrderValueLimit должно быть положительным")
 	}
 	return nil
 }
@@ -958,4 +976,74 @@ func (b *Bot) queryRiskEvents(ctx context.Context, limit int) ([]RiskEventRow, e
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// BacktestComparison is the payload for GET /api/backtest: one honest run per source
+// over the same confirmed history, plus a light SMA sensitivity grid. Heavy CTS
+// sensitivity is intentionally CLI-only (offline, no HTTP timeout risk).
+type BacktestComparison struct {
+	SMA            *backtest.Result     `json:"sma,omitempty"`
+	CTS            *backtest.Result     `json:"cts,omitempty"`
+	SMASensitivity []backtest.SensRow   `json:"smaSensitivity,omitempty"`
+	SMASensSummary backtest.SensSummary `json:"smaSensSummary,omitempty"`
+	Assumptions    []string             `json:"assumptions"`
+	Window         map[string]string    `json:"window"`
+}
+
+// RunBacktest loads confirmed history from the DB and replays both signal sources with
+// explicit costs and next-bar fills. It is read-only wrt trading state.
+func (b *Bot) RunBacktest(ctx context.Context, symbol, interval, source string, start, end time.Time, takerBps, slipBps, maxPos, maxDD, equity float64, withSMAGrid bool, step, minTrades int) (*BacktestComparison, error) {
+	candles, err := backtest.LoadCandles(ctx, b.db, symbol, interval, start, end)
+	if err != nil {
+		return nil, err
+	}
+	if len(candles) < 50 {
+		return nil, fmt.Errorf("only %d confirmed candles in window; need >=50", len(candles))
+	}
+
+	fee := backtest.ResolveFees(takerBps, slipBps)
+	base := backtest.Config{
+		Interval: interval, FastPeriod: b.settings.FastPeriod, SlowPeriod: b.settings.SlowPeriod,
+		MaxPositionPct: maxPos, MaxDrawdownPct: maxDD, StartEquity: equity,
+		Fee: fee, Execution: backtest.NextBarOpen,
+	}
+
+	out := &BacktestComparison{
+		Assumptions: fee.Assumptions(),
+		Window:      map[string]string{"symbol": symbol, "interval": interval, "bars": fmt.Sprint(len(candles))},
+	}
+
+	if source == "" || source == "sma" || source == "both" {
+		c := base
+		c.Source = "sma"
+		r := backtest.Run(candles, nil, c)
+		out.SMA = &r
+		out.Assumptions = append(out.Assumptions, r.Assumptions...)
+		if withSMAGrid {
+			rows, sum := backtest.SensGrid(candles, nil, c, step, minTrades)
+			out.SMASensitivity = rows
+			out.SMASensSummary = sum
+		}
+	}
+	if source == "" || source == "cts" || source == "both" {
+		c := base
+		c.Source = "cts"
+		p := strategy.DefaultParams()
+		c.CTSParams = &p
+		// HTF: prefer DB, fallback to a read-only exchange fetch.
+		var htf []strategy.Candle
+		if n, _ := backtest.CountCandles(ctx, b.db, symbol, p.HTFTimeframe); n > 0 {
+			htf, err = backtest.LoadCandles(ctx, b.db, symbol, p.HTFTimeframe, time.Time{}, time.Time{})
+			if err != nil {
+				return nil, err
+			}
+		} else if raw, e := b.mxc.GetKlines(ctx, symbol, p.HTFTimeframe, p.HTFLen+60); e == nil {
+			sort.Slice(raw, func(i, j int) bool { return raw[i].OpenTime.Before(raw[j].OpenTime) })
+			htf = toStrategyCandles(raw)
+		}
+		r := backtest.Run(candles, htf, c)
+		out.CTS = &r
+		out.Assumptions = append(out.Assumptions, r.Assumptions...)
+	}
+	return out, nil
 }

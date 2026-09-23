@@ -10,11 +10,10 @@ const EMA_FAST = "#2dd4bf";
 const EMA_SLOW = "#fb923c";
 const TS1 = "#a78bfa";
 const TS2 = "#38bdf8";
-// Smart Money palette (matches BigBeluga intent: bearish top / bullish bottom / POC yellow).
-const SM_TOP = "#d35422";   // bearCol
-const SM_BOT = "#00a5e6";   // bullCol
-const SM_POC = "#f1c40f";   // yellow
-const SM_MID = "#94a3b8";   // gray
+const SM_TOP = "#d35422";
+const SM_BOT = "#00a5e6";
+const SM_POC = "#f1c40f";
+const SM_MID = "#94a3b8";
 
 const CHART_PRICE_DECIMALS = 6;
 const CHART_PRICE_MIN_MOVE = 1 / Math.pow(10, CHART_PRICE_DECIMALS);
@@ -24,15 +23,15 @@ function toUnixSec(value) {
   if (!Number.isFinite(ms)) return null;
   return Math.floor(ms / 1000);
 }
-function isNum(v) {
-  return v != null && Number.isFinite(Number(v));
-}
+function isNum(v) { return v != null && Number.isFinite(Number(v)); }
 
-// Build markers from SMA orders + risk events + CTS indicator + Smart Money sweeps.
-function buildMarkers(bars, orders, riskEvents, indicator, smartMoney) {
+// Marker builder respects visibility.markers.* ; undefined => show (back-compat).
+function buildMarkers(bars, orders, riskEvents, indicator, smartMoney, visibility) {
   if (!Array.isArray(bars) || bars.length === 0) return [];
   const times = bars.map((b) => b.time).filter((t) => t != null).sort((a, b) => a - b);
   if (times.length === 0) return [];
+
+  const mk = (g) => visibility?.markers?.[g] !== false;
 
   const snap = (eventTime) => {
     if (eventTime == null || eventTime < times[0]) return null;
@@ -46,41 +45,48 @@ function buildMarkers(bars, orders, riskEvents, indicator, smartMoney) {
 
   const markers = [];
 
-  for (const o of orders ?? []) {
-    const side = String(o.side || "").toUpperCase();
-    if (side !== "BUY" && side !== "SELL") continue;
-    const t = snap(toUnixSec(o.createdAt));
-    if (t == null) continue;
-    markers.push({ time: t, position: side === "BUY" ? "belowBar" : "aboveBar", color: side === "BUY" ? UP : DOWN, shape: side === "BUY" ? "arrowUp" : "arrowDown", text: side, size: 1 });
+  if (mk("smaOrders")) {
+    for (const o of orders ?? []) {
+      const side = String(o.side || "").toUpperCase();
+      if (side !== "BUY" && side !== "SELL") continue;
+      const t = snap(toUnixSec(o.createdAt));
+      if (t == null) continue;
+      markers.push({ time: t, position: side === "BUY" ? "belowBar" : "aboveBar", color: side === "BUY" ? UP : DOWN, shape: side === "BUY" ? "arrowUp" : "arrowDown", text: side, size: 1 });
+    }
   }
 
-  for (const r of riskEvents ?? []) {
-    const type = String(r.type || "");
-    const t = snap(toUnixSec(r.createdAt));
-    if (t == null) continue;
-    if (type === "max_drawdown") markers.push({ time: t, position: "aboveBar", color: DOWN, shape: "circle", text: "STOP", size: 1 });
-    else if (type === "live_order_error") markers.push({ time: t, position: "aboveBar", color: WARN, shape: "square", text: "ERR", size: 1 });
+  if (mk("riskEvents")) {
+    for (const r of riskEvents ?? []) {
+      const type = String(r.type || "");
+      const t = snap(toUnixSec(r.createdAt));
+      if (t == null) continue;
+      if (type === "max_drawdown") markers.push({ time: t, position: "aboveBar", color: DOWN, shape: "circle", text: "STOP", size: 1 });
+      else if (type === "live_order_error") markers.push({ time: t, position: "aboveBar", color: WARN, shape: "square", text: "ERR", size: 1 });
+    }
   }
 
-  for (const ib of indicator ?? []) {
-    const t = toUnixSec(ib.time);
-    if (t == null) continue;
-    if (ib.longSignal) { markers.push({ time: t, position: "belowBar", color: "#ffffff", shape: "arrowUp", text: "LONG", size: 2 }); continue; }
-    if (ib.shortSignal) { markers.push({ time: t, position: "aboveBar", color: "#ffffff", shape: "arrowDown", text: "SHORT", size: 2 }); continue; }
-    if (ib.cisdBull) { markers.push({ time: t, position: "belowBar", color: UP, shape: "labelUp", text: "CISD", size: 1 }); continue; }
-    if (ib.cisdBear) { markers.push({ time: t, position: "aboveBar", color: DOWN, shape: "labelDown", text: "CISD", size: 1 }); continue; }
-    if (ib.tsBull) { markers.push({ time: t, position: "belowBar", color: UP, shape: "arrowUp", text: "TS", size: 1 }); continue; }
-    if (ib.tsBear) { markers.push({ time: t, position: "aboveBar", color: DOWN, shape: "arrowDown", text: "TS", size: 1 }); continue; }
-    if (ib.bullSweep) { markers.push({ time: t, position: "belowBar", color: UP, shape: "diamond", text: "SWP", size: 1 }); continue; }
-    if (ib.bearSweep) { markers.push({ time: t, position: "aboveBar", color: DOWN, shape: "diamond", text: "SWP", size: 1 }); }
+  if (mk("cts")) {
+    for (const ib of indicator ?? []) {
+      const t = toUnixSec(ib.time);
+      if (t == null) continue;
+      if (ib.longSignal) { markers.push({ time: t, position: "belowBar", color: "#ffffff", shape: "arrowUp", text: "LONG", size: 2 }); continue; }
+      if (ib.shortSignal) { markers.push({ time: t, position: "aboveBar", color: "#ffffff", shape: "arrowDown", text: "SHORT", size: 2 }); continue; }
+      if (ib.cisdBull) { markers.push({ time: t, position: "belowBar", color: UP, shape: "labelUp", text: "CISD", size: 1 }); continue; }
+      if (ib.cisdBear) { markers.push({ time: t, position: "aboveBar", color: DOWN, shape: "labelDown", text: "CISD", size: 1 }); continue; }
+      if (ib.tsBull) { markers.push({ time: t, position: "belowBar", color: UP, shape: "arrowUp", text: "TS", size: 1 }); continue; }
+      if (ib.tsBear) { markers.push({ time: t, position: "aboveBar", color: DOWN, shape: "arrowDown", text: "TS", size: 1 }); continue; }
+      if (ib.bullSweep) { markers.push({ time: t, position: "belowBar", color: UP, shape: "diamond", text: "SWP", size: 1 }); continue; }
+      if (ib.bearSweep) { markers.push({ time: t, position: "aboveBar", color: DOWN, shape: "diamond", text: "SWP", size: 1 }); }
+    }
   }
 
-  // Smart Money liquidity-sweep markers (◆ in Pine). One per bar by priority.
-  for (const sb of smartMoney?.perBar ?? []) {
-    const t = toUnixSec(sb.time);
-    if (t == null) continue;
-    if (sb.topSweep) { markers.push({ time: t, position: "aboveBar", color: SM_TOP, shape: "diamond", text: "LQ▲", size: 1 }); continue; }
-    if (sb.bottomSweep) { markers.push({ time: t, position: "belowBar", color: SM_BOT, shape: "diamond", text: "LQ▼", size: 1 }); }
+  if (mk("smartMoney")) {
+    for (const sb of smartMoney?.perBar ?? []) {
+      const t = toUnixSec(sb.time);
+      if (t == null) continue;
+      if (sb.topSweep) { markers.push({ time: t, position: "aboveBar", color: SM_TOP, shape: "diamond", text: "LQ▲", size: 1 }); continue; }
+      if (sb.bottomSweep) { markers.push({ time: t, position: "belowBar", color: SM_BOT, shape: "diamond", text: "LQ▼", size: 1 }); }
+    }
   }
 
   markers.sort((a, b) => a.time - b.time);
@@ -100,7 +106,6 @@ function toLinePoints(rows, key) {
   return out;
 }
 
-// Last finite value in a per-bar series (for horizontal level lines).
 function lastFinite(rows, key) {
   if (!Array.isArray(rows)) return null;
   for (let i = rows.length - 1; i >= 0; i--) {
@@ -110,7 +115,7 @@ function lastFinite(rows, key) {
   return null;
 }
 
-export default function CandleChart({ candles, orders, riskEvents, indicator, smartMoney, symbol, interval, signalSource }) {
+export default function CandleChart({ candles, orders, riskEvents, indicator, smartMoney, visibility, symbol, interval, signalSource }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const candleSeriesRef = useRef(null);
@@ -119,9 +124,11 @@ export default function CandleChart({ candles, orders, riskEvents, indicator, sm
   const emaSlowRef = useRef(null);
   const ts1Ref = useRef(null);
   const ts2Ref = useRef(null);
-  const smLinesRef = useRef([]); // created price lines, removed/re-added on update
+  const smLinesRef = useRef([]);
   const prevMetaRef = useRef({ symbol: "", interval: "" });
   const [autoFit, setAutoFit] = useState(false);
+
+  const ln = (name) => visibility?.lines?.[name] !== false;
 
   const seriesData = useMemo(() => {
     if (!Array.isArray(candles)) return [];
@@ -136,24 +143,31 @@ export default function CandleChart({ candles, orders, riskEvents, indicator, sm
     return out;
   }, [candles]);
 
-  const volumeData = useMemo(() => {
-    if (!Array.isArray(candles)) return [];
-    const seen = new Set(); const out = [];
-    for (const c of candles) {
-      const t = toUnixSec(c.openTime);
-      if (t == null || seen.has(t)) continue;
-      seen.add(t);
-      out.push({ time: t, value: Number(c.volume) || 0, color: c.close >= c.open ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)" });
-    }
-    out.sort((a, b) => a.time - b.time);
-    return out;
-  }, [candles]);
+  const volumeData = useMemo(
+    () => {
+      if (!ln("volume") || !Array.isArray(candles)) return [];
+      const seen = new Set(); const out = [];
+      for (const c of candles) {
+        const t = toUnixSec(c.openTime);
+        if (t == null || seen.has(t)) continue;
+        seen.add(t);
+        out.push({ time: t, value: Number(c.volume) || 0, color: c.close >= c.open ? "rgba(34,197,94,0.35)" : "rgba(239,68,68,0.35)" });
+      }
+      out.sort((a, b) => a.time - b.time);
+      return out;
+    },
+    [candles, visibility],
+  );
 
-  const markers = useMemo(() => buildMarkers(seriesData, orders, riskEvents, indicator, smartMoney), [seriesData, orders, riskEvents, indicator, smartMoney]);
-  const emaFastPts = useMemo(() => toLinePoints(indicator, "emaFast"), [indicator]);
-  const emaSlowPts = useMemo(() => toLinePoints(indicator, "emaSlow"), [indicator]);
-  const ts1Pts = useMemo(() => toLinePoints(indicator, "tsV1"), [indicator]);
-  const ts2Pts = useMemo(() => toLinePoints(indicator, "tsV2"), [indicator]);
+  const markers = useMemo(
+    () => buildMarkers(seriesData, orders, riskEvents, indicator, smartMoney, visibility),
+    [seriesData, orders, riskEvents, indicator, smartMoney, visibility],
+  );
+
+  const emaFastPts = useMemo(() => (ln("ema") ? toLinePoints(indicator, "emaFast") : []), [indicator, visibility]);
+  const emaSlowPts = useMemo(() => (ln("ema") ? toLinePoints(indicator, "emaSlow") : []), [indicator, visibility]);
+  const ts1Pts = useMemo(() => (ln("ts") ? toLinePoints(indicator, "tsV1") : []), [indicator, visibility]);
+  const ts2Pts = useMemo(() => (ln("ts") ? toLinePoints(indicator, "tsV2") : []), [indicator, visibility]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -190,7 +204,7 @@ export default function CandleChart({ candles, orders, riskEvents, indicator, sm
     };
   }, []);
 
-  // Viewport hold via LOGICAL range (see prior fix): no right-edge drift on new bars.
+  // Viewport hold via LOGICAL range: no right-edge drift on new bars.
   useEffect(() => {
     const chart = chartRef.current; const cs = candleSeriesRef.current; const vs = volumeSeriesRef.current;
     if (!chart || !cs || !vs) return;
@@ -212,12 +226,13 @@ export default function CandleChart({ candles, orders, riskEvents, indicator, sm
   useEffect(() => { if (ts2Ref.current) ts2Ref.current.setData(ts2Pts); }, [ts2Pts]);
   useEffect(() => { if (!candleSeriesRef.current) return; candleSeriesRef.current.setMarkers(markers); }, [markers]);
 
-  // Smart Money horizontal level lines: remove old, add current standing values.
+  // Smart Money horizontal level lines, gated by visibility.lines.smartMoney.
   useEffect(() => {
     const cs = candleSeriesRef.current;
     if (!cs) return;
-    for (const ln of smLinesRef.current) { try { cs.removePriceLine(ln); } catch { /* noop */ } }
+    for (const line of smLinesRef.current) { try { cs.removePriceLine(line); } catch { /* noop */ } }
     smLinesRef.current = [];
+    if (!ln("smartMoney")) return;
     const perBar = smartMoney?.perBar;
     const prof = smartMoney?.profile;
     const add = (price, color, style, title) => {
@@ -230,9 +245,9 @@ export default function CandleChart({ candles, orders, riskEvents, indicator, sm
       add(prof.pocPrice, SM_POC, LineStyle.Solid, "POC");
       add(prof.midPrice, SM_MID, LineStyle.Dashed, "Mid");
     }
-  }, [smartMoney]);
+  }, [smartMoney, visibility]);
 
-  const showOverlay = signalSource === "cts";
+  const showCtsLines = signalSource === "cts";
   const prof = smartMoney?.profile;
   const fmt6 = (v) => (isNum(v) ? Number(v).toFixed(CHART_PRICE_DECIMALS) : "—");
 
@@ -256,21 +271,20 @@ export default function CandleChart({ candles, orders, riskEvents, indicator, sm
       <div ref={containerRef} className="chart-wrap">
         <button type="button" onClick={() => setAutoFit((v) => !v)} title={autoFit ? "Auto-fit ON — click to hold your view" : "Auto-fit OFF — click to fill window"} aria-pressed={autoFit} style={btnBase}>A</button>
       </div>
-      {showOverlay && (
+      {showCtsLines && (ln("ema") || ln("ts")) && (
         <div className="chart-legend-lines">
-          <span><i style={{ background: EMA_FAST }} /> EMA Fast</span>
-          <span><i style={{ background: EMA_SLOW }} /> EMA Slow</span>
-          <span><i style={{ background: TS1 }} /> TS V1</span>
-          <span><i style={{ background: TS2 }} /> TS V2</span>
+          {ln("ema") && (<><span><i style={{ background: EMA_FAST }} /> EMA Fast</span><span><i style={{ background: EMA_SLOW }} /> EMA Slow</span></>)}
+          {ln("ts") && (<><span><i style={{ background: TS1 }} /> TS V1</span><span><i style={{ background: TS2 }} /> TS V2</span></>)}
         </div>
       )}
-      {/* Smart Money structural read-out (observability only). */}
-      <div className="chart-legend-lines">
-        <span><i style={{ background: SM_TOP }} /> Liq Top {fmt6(lastFinite(smartMoney?.perBar, "liqTop"))}</span>
-        <span><i style={{ background: SM_BOT }} /> Liq Bot {fmt6(lastFinite(smartMoney?.perBar, "liqBottom"))}</span>
-        <span><i style={{ background: SM_POC }} /> POC {prof?.valid ? fmt6(prof.pocPrice) : "—"}</span>
-        <span><i style={{ background: SM_MID }} /> Mid {prof?.valid ? fmt6(prof.midPrice) : "—"}</span>
-      </div>
+      {ln("smartMoney") && (
+        <div className="chart-legend-lines">
+          <span><i style={{ background: SM_TOP }} /> Liq Top {fmt6(lastFinite(smartMoney?.perBar, "liqTop"))}</span>
+          <span><i style={{ background: SM_BOT }} /> Liq Bot {fmt6(lastFinite(smartMoney?.perBar, "liqBottom"))}</span>
+          <span><i style={{ background: SM_POC }} /> POC {prof?.valid ? fmt6(prof.pocPrice) : "—"}</span>
+          <span><i style={{ background: SM_MID }} /> Mid {prof?.valid ? fmt6(prof.midPrice) : "—"}</span>
+        </div>
+      )}
       {seriesData.length === 0 && (
         <div className="chart-empty">Нет свечей для отображения. Дождитесь первого поллинга или смените пару/таймфрейм в Settings.</div>
       )}

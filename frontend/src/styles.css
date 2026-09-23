@@ -170,3 +170,45 @@ td.empty { color: var(--muted); white-space: normal; }
 .chart-legend-lines i {
   display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 2px;
 }
+
+/* Chart visibility controls (client-side, localStorage) */
+.vis-section {
+  margin: 16px 0 4px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(12, 18, 32, 0.5);
+}
+.vis-title { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+.vis-sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; line-height: 1.4; }
+.vis-group { margin-bottom: 12px; }
+.vis-group:last-child { margin-bottom: 0; }
+.vis-group-label {
+  color: var(--muted); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.08em; margin-bottom: 6px;
+}
+.vis-check {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text);
+  padding: 3px 0; cursor: pointer;
+}
+.vis-check input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+
+/* Backtest panel */
+.bt-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.bt-head h2 { margin: 0; font-size: 18px; }
+.bt-controls { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.bt-field { display: flex; flex-direction: column; gap: 4px; }
+.bt-field span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.bt-field input { background: #0b1224; border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 7px 9px; width: 110px; font-size: 13px; }
+.bt-check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); padding-bottom: 7px; }
+.bt-check input { accent-color: var(--accent); }
+.bt-note { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 0 0 12px; }
+.bt-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
+.bt-table th, .bt-table td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.bt-table th { color: var(--muted); font-weight: 600; }
+.bt-table td:nth-child(2), .bt-table td:nth-child(3) { text-align: right; font-variant-numeric: tabular-nums; }
+.bt-table-sens td, .bt-table-sens th { font-size: 12px; }
+.bt-sens h3 { margin: 8px 0 6px; font-size: 15px; }
+.bt-sens-summary { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+.bt-sens-summary em { color: var(--yellow); font-style: normal; }

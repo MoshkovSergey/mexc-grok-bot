@@ -1,4 +1,5 @@
-// Package api exposes HTTP endpoints for the dashboard, bot control and settings.
+// Package api exposes HTTP endpoints for the dashboard, bot control, settings and
+// the offline backtest comparison (read-only wrt trading).
 package api
 
 import (
@@ -6,7 +7,9 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/MoshkovSergey/mexc-grok-bot/backend/internal/bot"
 	"github.com/MoshkovSergey/mexc-grok-bot/backend/internal/config"
@@ -64,7 +67,60 @@ func NewRouter(b *bot.Bot, cfg *config.Config) http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 	})
 
+	// Offline, cost-aware backtest comparison (read-only; heavy CTS grid is CLI-only).
+	mux.HandleFunc("GET /api/backtest", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		symbol := strings.ToUpper(strings.TrimSpace(q.Get("symbol")))
+		if symbol == "" {
+			symbol = b.GetSettings().Settings.Symbol
+		}
+		interval := strings.TrimSpace(q.Get("interval"))
+		if interval == "" {
+			interval = b.GetSettings().Settings.Interval
+		}
+		source := strings.ToLower(strings.TrimSpace(q.Get("source"))) // "" | sma | cts | both
+		start := parseQTime(q.Get("start"))
+		end := parseQTime(q.Get("end"))
+		f := func(k string, def float64) float64 {
+			if v, err := strconv.ParseFloat(strings.TrimSpace(q.Get(k)), 64); err == nil && v > 0 {
+				return v
+			}
+			return def
+		}
+		i := func(k string, def int) int {
+			if v, err := strconv.Atoi(strings.TrimSpace(q.Get(k))); err == nil && v > 0 {
+				return v
+			}
+			return def
+		}
+		st := b.GetSettings().Settings
+		res, err := b.RunBacktest(r.Context(), symbol, interval, source, start, end,
+			f("takerBps", 0), f("slippageBps", 0),
+			f("maxPos", st.MaxPositionPct), f("maxDD", st.MaxDrawdownPct),
+			f("equity", st.PaperEquity),
+			q.Get("smaGrid") == "1", i("step", 2), i("minTrades", 30))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+
 	return corsMiddleware(cfg, mux)
+}
+
+func parseQTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.UTC()
+	}
+	return time.Time{}
 }
 
 func corsMiddleware(_ *config.Config, next http.Handler) http.Handler {
@@ -85,9 +141,7 @@ func corsMiddleware(_ *config.Config, next http.Handler) http.Handler {
 }
 
 // writeJSON marshals to a buffer BEFORE writing headers, so a serialization error
-// (e.g. a residual NaN/Inf outside the strategy package) cannot produce a truncated
-// 200 body — the browser symptom we are fixing ("Unexpected end of JSON input").
-// On error we log and return an explicit 500 with a JSON message instead.
+// (e.g. a residual NaN/Inf) cannot produce a truncated 200 body.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	buf, err := json.Marshal(v)
 	if err != nil {
